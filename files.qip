@@ -21,4 +21,6 @@ set_global_assignment -name VHDL_FILE rtl/vdp.vhd
 set_global_assignment -name VHDL_FILE rtl/system.vhd
 set_global_assignment -name VHDL_FILE rtl/io.vhd
 set_global_assignment -name VHDL_FILE rtl/AudioMix.vhd
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ra_ram_mirror_sms.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ddram_arb_sms.sv
 set_global_assignment -name SYSTEMVERILOG_FILE SMS.sv

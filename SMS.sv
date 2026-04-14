@@ -194,6 +194,7 @@ assign HDMI_FREEZE = 0;
 assign HDMI_BLACKOUT = 0;
 assign HDMI_BOB_DEINT = 0;
 assign FB_FORCE_BLANK = 0;
+assign DDRAM_CLK = clk_sys;
 
 wire       vcrop_en = status[50];
 wire [3:0] vcopt    = status[54:51];
@@ -238,7 +239,29 @@ end
 
 wire [1:0] ar = status[27:26];
 wire vga_de;
-screen_rotate screen_rotate (.*);
+
+// Intermediate wires to break screen_rotate auto-connect for DDRAM
+// (arbiter takes ownership of the physical DDRAM bus)
+wire        sr_ddram_busy;
+wire  [7:0] sr_ddram_burstcnt;
+wire [28:0] sr_ddram_addr;
+wire [63:0] sr_ddram_din;
+wire  [7:0] sr_ddram_be;
+wire        sr_ddram_we;
+wire        sr_ddram_rd;
+
+screen_rotate screen_rotate
+(
+	.*,
+	.DDRAM_CLK(),           // driven by screen_rotate internally, ignored here
+	.DDRAM_BUSY(sr_ddram_busy),
+	.DDRAM_BURSTCNT(sr_ddram_burstcnt),
+	.DDRAM_ADDR(sr_ddram_addr),
+	.DDRAM_DIN(sr_ddram_din),
+	.DDRAM_BE(sr_ddram_be),
+	.DDRAM_WE(sr_ddram_we),
+	.DDRAM_RD(sr_ddram_rd)
+);
 video_freak video_freak
 (
 	.*,
@@ -953,13 +976,22 @@ always @(posedge clk_sys) begin
 	end
 end
 
-spram #(.widthad_a(14)) ram_inst
+// --- RetroAchievements: System RAM converted to dpram (port B for RA mirror) ---
+wire [13:0] ra_sysram_addr;
+wire  [7:0] ra_sysram_dout;
+
+dpram #(.widthad_a(14)) ram_inst
 (
-	.clock     (clk_sys),
-	.address   (ram_clr_run ? ram_clr_addr : (systeme ? ram_a : {1'b0,ram_a[12:0]})),
-	.wren      (ram_clr_run | ram_we),
-	.data      (ram_clr_run ? 8'h00 : ram_d),
-	.q         (ram_q)
+	.clock_a     (clk_sys),
+	.address_a   (ram_clr_run ? ram_clr_addr : (systeme ? ram_a : {1'b0,ram_a[12:0]})),
+	.wren_a      (ram_clr_run | ram_we),
+	.data_a      (ram_clr_run ? 8'h00 : ram_d),
+	.q_a         (ram_q),
+	.clock_b     (clk_sys),
+	.address_b   (ra_sysram_addr),
+	.wren_b      (1'b0),
+	.data_b      (8'd0),
+	.q_b         (ra_sysram_dout)
 );
 
 wire [15:0] audio_l, audio_r;
@@ -1077,6 +1109,14 @@ always @(posedge clk_sys) begin
 		bk_pending <= 1'b0;
 end
 
+// --- RetroAchievements: NVRAM port B muxed between SD card (bk_state) and RA mirror ---
+wire [14:0] ra_nvram_addr;
+wire [14:0] nvram_b_addr = bk_state ? {sd_lba[5:0], sd_buff_addr} : ra_nvram_addr;
+wire        nvram_b_wren = bk_state ? (sd_buff_wr & sd_ack) : 1'b0;
+wire  [7:0] nvram_b_data = bk_state ? sd_buff_dout : 8'd0;
+wire  [7:0] nvram_b_q;
+assign sd_buff_din = nvram_b_q;
+
 dpram #(.widthad_a(15)) nvram_inst
 (
 	.clock_a     (clk_sys),
@@ -1085,10 +1125,92 @@ dpram #(.widthad_a(15)) nvram_inst
 	.data_a      (nvram_d),
 	.q_a         (nvram_q),
 	.clock_b     (clk_sys),
-	.address_b   ({sd_lba[5:0],sd_buff_addr}),
-	.wren_b      (sd_buff_wr & sd_ack),
-	.data_b      (sd_buff_dout),
-	.q_b         (sd_buff_din)
+	.address_b   (nvram_b_addr),
+	.wren_b      (nvram_b_wren),
+	.data_b      (nvram_b_data),
+	.q_b         (nvram_b_q)
+);
+
+// --- RetroAchievements RAM Mirror ---
+wire [28:0] ra_ddram_wr_addr;
+wire [63:0] ra_ddram_wr_din;
+wire  [7:0] ra_ddram_wr_be;
+wire        ra_ddram_wr_req;
+wire        ra_ddram_wr_ack;
+wire [28:0] ra_ddram_rd_addr;
+wire        ra_ddram_rd_req;
+wire        ra_ddram_rd_ack;
+wire [63:0] ra_ddram_rd_dout;
+wire        ra_active;
+wire [31:0] ra_dbg_frame;
+
+ra_ram_mirror_sms ra_mirror
+(
+	.clk(clk_sys),
+	.reset(reset_active),
+	.vblank(VBlank),
+
+	// System RAM port B
+	.sysram_addr(ra_sysram_addr),
+	.sysram_dout(ra_sysram_dout),
+
+	// NVRAM port B (muxed in nvram_inst above)
+	.nvram_addr(ra_nvram_addr),
+	.nvram_dout(nvram_b_q),
+
+	// DDRAM toggle interface
+	.ddram_wr_addr(ra_ddram_wr_addr),
+	.ddram_wr_din(ra_ddram_wr_din),
+	.ddram_wr_be(ra_ddram_wr_be),
+	.ddram_wr_req(ra_ddram_wr_req),
+	.ddram_wr_ack(ra_ddram_wr_ack),
+	.ddram_rd_addr(ra_ddram_rd_addr),
+	.ddram_rd_req(ra_ddram_rd_req),
+	.ddram_rd_ack(ra_ddram_rd_ack),
+	.ddram_rd_dout(ra_ddram_rd_dout),
+
+	.active(ra_active),
+	.dbg_frame_counter(ra_dbg_frame)
+);
+
+// --- RetroAchievements DDRAM Arbiter ---
+// screen_rotate is primary master, RA mirror is secondary.
+ddram_arb_sms ddram_arb
+(
+	.clk(clk_sys),
+
+	// Physical DDRAM
+	.PHY_BUSY(DDRAM_BUSY),
+	.PHY_BURSTCNT(DDRAM_BURSTCNT),
+	.PHY_ADDR(DDRAM_ADDR),
+	.PHY_DOUT(DDRAM_DOUT),
+	.PHY_DOUT_READY(DDRAM_DOUT_READY),
+	.PHY_RD(DDRAM_RD),
+	.PHY_DIN(DDRAM_DIN),
+	.PHY_BE(DDRAM_BE),
+	.PHY_WE(DDRAM_WE),
+
+	// Primary master: screen_rotate (framebuffer for rotation)
+	.MDP_BUSY(sr_ddram_busy),
+	.MDP_BURSTCNT(sr_ddram_burstcnt),
+	.MDP_ADDR(sr_ddram_addr),
+	.MDP_DOUT(),
+	.MDP_DOUT_READY(),
+	.MDP_RD(sr_ddram_rd),
+	.MDP_DIN(sr_ddram_din),
+	.MDP_BE(sr_ddram_be),
+	.MDP_WE(sr_ddram_we),
+
+	// RA mirror (secondary, toggle protocol)
+	.ra_wr_addr(ra_ddram_wr_addr),
+	.ra_wr_din(ra_ddram_wr_din),
+	.ra_wr_be(ra_ddram_wr_be),
+	.ra_wr_req(ra_ddram_wr_req),
+	.ra_wr_ack(ra_ddram_wr_ack),
+	.ra_rd_addr(ra_ddram_rd_addr),
+	.ra_rd_req(ra_ddram_rd_req),
+	.ra_rd_ack(ra_ddram_rd_ack),
+	.ra_rd_dout(ra_ddram_rd_dout)
 );
 
 wire downloading = cart_download;
