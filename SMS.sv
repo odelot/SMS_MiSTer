@@ -289,7 +289,7 @@ parameter CONF_STR = {
 	"H8FS2,GG;",
 	"DIP;",
 	"-;",
-	"C,Cheats;",
+	"HAC,Cheats;",
 	"H1OO,Cheats Enabled,ON,OFF;",
 	"-;",
 	"H8OP,Autosave,OFF,ON;",
@@ -473,6 +473,7 @@ wire  [7:0] paddle_0, paddle_1;
 wire  [1:0] buttons;
 wire [10:0] ps2_key;
 wire [63:0] status;
+wire        hardcore = status[55];
 
 wire        ioctl_wr;
 wire [24:0] ioctl_addr;
@@ -515,7 +516,7 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(0)) hps_io
 	.buttons(buttons),
 	.ps2_key(ps2_key),
 	.status(status),
-	.status_menumask({status[25],systeme,~dbg_menu,en216p,status[13],~gun_en,~raw_serial,gg,~gg_avail,~bk_ena}),
+	.status_menumask({hardcore,status[25],systeme,~dbg_menu,en216p,status[13],~gun_en,~raw_serial,gg,(~gg_avail | hardcore),~bk_ena}),
 	.forced_scandoubler(forced_scandoubler),
 	.new_vmode(pal),
 	.gamma_bus(gamma_bus),
@@ -770,7 +771,7 @@ system #(63) system
 	.RESET_n(~reset_active),
 
 	.GG_RESET(ioctl_download && ioctl_wr && !ioctl_addr),
-	.GG_EN(status[24]),
+	.GG_EN(status[24] & ~hardcore),
 	.GG_CODE(gg_code),
 	.GG_AVAIL(gg_avail),
 
