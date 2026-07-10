@@ -771,7 +771,9 @@ system #(63) system
 	.RESET_n(~reset_active),
 
 	.GG_RESET(ioctl_download && ioctl_wr && !ioctl_addr),
-	.GG_EN(status[24] & ~hardcore),
+	// GG_EN is active-low inside system.vhd (enable => not GG_EN), so
+	// hardcore must FORCE it high to shut the Game Genie off.
+	.GG_EN(status[24] | hardcore),
 	.GG_CODE(gg_code),
 	.GG_AVAIL(gg_avail),
 
