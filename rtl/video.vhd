@@ -13,7 +13,13 @@ entity video is
 		mask_column:	in  std_logic := '0';
 		cut_mask:		in	std_logic;
 		smode_M1:		in	 std_logic;
+		smode_M2:		in	 std_logic;
 		smode_M3:		in	 std_logic;
+		smode_M4:		in	 std_logic;
+		
+		video_state_out: out std_logic_vector(21 downto 0);
+		video_state_in:  in  std_logic_vector(21 downto 0) := (others => '0');
+		video_state_set: in  std_logic := '0';
 		
 		x: 				out std_logic_vector(8 downto 0);
 		y:					out std_logic_vector(8 downto 0);
@@ -27,6 +33,11 @@ architecture Behavioral of video is
 
 	signal hcount:			std_logic_vector(8 downto 0) := (others => '0');
 	signal vcount:			std_logic_vector(8 downto 0) := (others => '0');
+	
+	signal hsync_reg:		std_logic := '0';
+	signal vsync_reg:		std_logic := '0';
+	signal hblank_reg:		std_logic := '0';
+	signal vblank_reg:		std_logic := '0';
 
 	signal vbl_st,vbl_end: std_logic_vector(8 downto 0);
 	signal hbl_st,hbl_end: std_logic_vector(8 downto 0);
@@ -35,64 +46,69 @@ begin
 	process (clk)
 	begin
 		if rising_edge(clk) then
-			if ce_pix = '1' then
+			if video_state_set = '1' then
+				hcount <= video_state_in(21 downto 13);
+				vcount <= video_state_in(12 downto 4);
+				hsync_reg <= video_state_in(3);
+				vsync_reg <= video_state_in(2);
+			elsif ce_pix = '1' then
 				if hcount=487	then
 					vcount <= vcount + 1;
 					if pal = '1' then
 						-- VCounter: 0-258, 458-511 = 313 steps
-						if smode_M1='1' then
+						if smode_M1='1' and smode_M2='1' then
 							if vcount = 258 then
 								vcount <= conv_std_logic_vector(458,9); 
 							elsif vcount = 461 then
-								vsync <= '1';
+								vsync_reg <= '1';
 							elsif vcount = 464 then
-								vsync <= '0';
+								vsync_reg <= '0';
 							end if;
-						elsif smode_M3='1' then
+						elsif smode_M3='1' and smode_M2='1' then
 							if vcount = 266 then
 								vcount <= conv_std_logic_vector(482,9);
 							elsif vcount = 482 then
-								vsync <= '1';
+								vsync_reg <= '1';
 							elsif vcount = 485 then
-								vsync <= '0';
+								vsync_reg <= '0';
 							end if;
 						else
 						-- VCounter: 0-242, 442-511 = 313 steps
 							if vcount = 242 then
 								vcount <= conv_std_logic_vector(442,9);
 							elsif vcount = 442 then
-								vsync <= '1';
+								vsync_reg <= '1';
 							elsif vcount = 445 then
-								vsync <= '0';
+								vsync_reg <= '0';
 							end if;
 						end if;
 					else
 					-- NTSC mode 224 lines ...
-						if smode_M1='1' then
+						if smode_M1='1' and smode_M2='1' then
 							if vcount = 234 then 
 								vcount <= conv_std_logic_vector(485,9);
 							elsif vcount = 487 then
-								vsync <= '1';
+								vsync_reg <= '1';
 							elsif vcount = 490 then
-								vsync <= '0';
+								vsync_reg <= '0';
 							end if;
 					-- NTSC mode 240 lines -- this mode is not suposed to work anyway
-						elsif smode_M3='1' then 
+					elsif smode_M3='1' and smode_M2='1' then 
 							if vcount = 261 then -- needs to be > 240 to generate an IRQ
 								vcount <= conv_std_logic_vector(0,9);
 							elsif vcount = 257 then
-								vsync <= '1';
+								vsync_reg <= '1';
 							elsif vcount = 260 then
-								vsync <= '0';
+								vsync_reg <= '0';
 							end if;
 						else
 						-- VCounter: 0-218, 469-511 = 262 steps
 							if vcount = 218 then
 								vcount <= conv_std_logic_vector(469,9);
 							elsif vcount = 471 then
-								vsync <= '1';
+								vsync_reg <= '1';
 							elsif vcount = 474 then
-								vsync <= '0';
+								vsync_reg <= '0';
 							end if;
 						end if;
 					end if;
@@ -104,9 +120,9 @@ begin
 					hcount <= conv_std_logic_vector(466,9);
 				end if;
 				if hcount = 280 then
-					hsync <= '1';
+					hsync_reg <= '1';
 				elsif hcount = 474 then
-					hsync <= '0';
+					hsync_reg <= '0';
 				end if;
 			end if;
 		end if;
@@ -114,17 +130,23 @@ begin
 
 	x	<= hcount;
 	y	<= vcount;
+	hsync <= hsync_reg;
+	vsync <= vsync_reg;
+	hblank <= hblank_reg;
+	vblank <= vblank_reg;
+	
+	video_state_out <= hcount & vcount & hsync_reg & vsync_reg & hblank_reg & vblank_reg;
 
-	vbl_st  <= conv_std_logic_vector(184,9) when (smode_M1='1' and ggres='1')
-			else conv_std_logic_vector(224,9) when smode_M1 = '1'
-			else conv_std_logic_vector(240,9) when smode_M3 = '1'
+			vbl_st  <= conv_std_logic_vector(184,9) when (smode_M1='1' and smode_M2='1' and ggres='1')
+			else conv_std_logic_vector(224,9) when (smode_M1 = '1' and smode_M2 = '1')
+			else conv_std_logic_vector(240,9) when (smode_M3 = '1' and smode_M2 = '1')
 			else conv_std_logic_vector(216,9) when border = '1' and pal = '0'
 			else conv_std_logic_vector(240,9) when border = '1'
 			else conv_std_logic_vector(192,9) when ggres = '0'
 			else conv_std_logic_vector(168,9);
 			
 	vbl_end <= conv_std_logic_vector(40,9)  when (smode_M1='1' and ggres='1')
-			else conv_std_logic_vector(000,9) when smode_M1 = '1' or smode_M3 = '1' or (border = '0' and ggres = '0')
+			else conv_std_logic_vector(000,9) when (smode_M1 = '1' and smode_M2 = '1') or (smode_M3 = '1' and smode_M2 = '1') or (border = '0' and ggres = '0')
 			else conv_std_logic_vector(488,9) when border = '1' and pal = '0'
 			else conv_std_logic_vector(458,9) when border = '1'
 			else conv_std_logic_vector(024,9);
@@ -141,17 +163,20 @@ begin
 	process (clk)
 	begin
 		if rising_edge(clk) then
-			if ce_pix = '1' then
+			if video_state_set = '1' then
+				hblank_reg <= video_state_in(1);
+				vblank_reg <= video_state_in(0);
+			elsif ce_pix = '1' then
 				if (hcount=hbl_end) then
-					hblank <= '0';
+					hblank_reg <= '0';
 				elsif (hcount=hbl_st) then
-					hblank <= '1';
+					hblank_reg <= '1';
 				end if;
 				
 				if (vcount=vbl_end) then
-					vblank <= '0';
+					vblank_reg <= '0';
 				elsif (vcount=vbl_st) then
-					vblank <= '1';
+					vblank_reg <= '1';
 				end if;
 			end if;
 		end if;

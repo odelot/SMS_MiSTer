@@ -94,7 +94,14 @@ entity T80s is
 		OUT0        : in  std_logic := '0';  -- 0 => OUT(C),0, 1 => OUT(C),255
 		A				: out std_logic_vector(15 downto 0);
 		DI				: in std_logic_vector(7 downto 0);
-		DO				: out std_logic_vector(7 downto 0)
+		DO				: out std_logic_vector(7 downto 0);
+		-- Save state: snapshot of all Z80 registers
+		-- WZ,IFF2,IFF1,IM,IY,HL',DE',BC',IX,HL,DE,BC,PC,SP,R,I,F',A',F,A
+		REG        : out std_logic_vector(229 downto 0);
+		DIRSet     : in  std_logic := '0';
+		DIR        : in  std_logic_vector(229 downto 0) := (others => '0');
+		-- Prefix/instruction-set state forwarded from T80
+		ISet_out   : out std_logic_vector(1 downto 0)
 	);
 end T80s;
 
@@ -136,7 +143,11 @@ begin
 			MC => MCycle,
 			TS => TState,
 			OUT0 => OUT0,
-			IntCycle_n => IntCycle_n
+			IntCycle_n => IntCycle_n,
+			REG => REG,
+			DIRSet => DIRSet,
+			DIR => DIR,
+			ISet_out => ISet_out
 		);
 
 	process (RESET_n, CLK)
@@ -148,7 +159,12 @@ begin
 			MREQ_n <= '1';
 			DI_Reg <= "00000000";
 		elsif rising_edge(CLK) then
-			if CEN = '1' then
+			if DIRSet = '1' then
+				RD_n <= '1';
+				WR_n <= '1';
+				IORQ_n <= '1';
+				MREQ_n <= '1';
+			elsif CEN = '1' then
 				RD_n <= '1';
 				WR_n <= '1';
 				IORQ_n <= '1';

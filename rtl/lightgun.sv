@@ -47,6 +47,7 @@ always @(posedge CLK) begin
 	reg [8:0] cross_sz;
 	reg sensor_pend;
 	reg [7:0] sensor_time;
+	reg [17:0] jy_scaled;
 	
 	TRIGGER <= BTN_MODE ? MOUSE[0] : (JOY[4]|JOY[9]);
 
@@ -71,9 +72,16 @@ always @(posedge CLK) begin
 	else begin
 		lg_x <= j_x;
 
-		if(j_y < 8) lg_y <= 0;
-		else if((j_y - 9'd8) > vtotal) lg_y <= vtotal;
-		else lg_y <= j_y - 9'd8;
+		// j_y is 0..255 but vcnt only covers 0..vtotal (~191 NTSC, ~223 PAL).
+		// Without normalisation the cursor sits correctly at the top but drifts
+		// progressively lower than the beam position as y increases.
+		// Scale j_y into the active line range: lg_y = j_y*(vtotal+1)/256.
+		// jy_scaled is 18 bits to prevent Verilog from truncating the 9*9 multiply.
+		if(vtotal) begin
+			jy_scaled = {9'b0, j_y} * {9'b0, vtotal + 9'd1};
+			lg_y <= jy_scaled[16:8];
+		end else
+			lg_y <= 0;
 	end
 
 	if(CE_PIX) begin
