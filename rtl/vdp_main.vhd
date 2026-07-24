@@ -29,11 +29,15 @@ entity vdp_main is
 		display_on:			in  std_logic;
 		mask_column0:		in  std_logic;
 		black_column:			in  std_logic;
+		mode_M1_raw:		in  std_logic;
+		mode_M2_raw:		in  std_logic;
+		mode_M3_raw:		in  std_logic;
 		smode_M1:			in  std_logic;
 		smode_M3:			in  std_logic;
 		smode_M4:			in  std_logic;
 		ysj_quirk:			in  std_logic;
 		overscan:			in  std_logic_vector (3 downto 0);
+		text_fg_color:		in  std_logic_vector (3 downto 0);
 
 		bg_address:			in  std_logic_vector (3 downto 0);
 		m2mg_address:		in  std_logic_vector (2 downto 0);
@@ -49,7 +53,11 @@ entity vdp_main is
 		spr_tall:			in  std_logic;
 		spr_wide:			in  std_logic;
 		spr_collide:		out std_logic;
-		spr_overflow:		out std_logic);	
+		spr_overflow:		out std_logic;
+		-- Save-state: passed through to sprite scanner reset
+		ss_regs_set:		in  STD_LOGIC := '0';
+		ss_line_reset:		in  std_logic := '0';
+		ss_sprite_reset:	in  std_logic := '0');
 end vdp_main;
 
 architecture Behavioral of vdp_main is
@@ -61,11 +69,14 @@ architecture Behavioral of vdp_main is
 	signal out_color: 	std_logic_vector(3 downto 0) ;	
 	signal spr_vram_A:	std_logic_vector(13 downto 0);
 	signal spr_color:		std_logic_vector(3 downto 0);
+	signal text_mode:		std_logic;
 	
 	signal line_reset:	std_logic;
  	
 	
 begin
+
+	text_mode <= '1' when smode_M4='0' and mode_M1_raw='1' and mode_M2_raw='0' and mode_M3_raw='0' else '0';
 
 	process (x,y,bg_scroll_y,disable_vscroll,smode_M1,smode_M3)
 		variable sum: std_logic_vector(8 downto 0);
@@ -94,20 +105,26 @@ begin
 		table_address	=> bg_address,
 		pt_address		=> m2mg_address,
 		ct_address		=> m2ct_address,
-		reset				=> line_reset,
+		reset				=> line_reset or ss_line_reset,
 		disable_hscroll=> disable_hscroll,
 		scroll_x 		=> bg_scroll_x,
 		y					=> bg_y,
 		screen_y			=> y,
+		screen_x			=> x,
 		
 		vram_A			=> bg_vram_A,
 		vram_D			=> vram_D,		
 		color				=> bg_color,
+		mode_M1_raw		=> mode_M1_raw,
+		mode_M2_raw		=> mode_M2_raw,
+		mode_M3_raw		=> mode_M3_raw,
 		smode_M1			=> smode_M1,
 		smode_M3			=> smode_M3,
 		smode_M4			=> smode_M4,
 		ysj_quirk			=> ysj_quirk,
-		
+		text_fg_color	=> text_fg_color,
+		overscan			=> overscan,
+		ss_restore			=> ss_regs_set,
 		priority			=> bg_priority);
 		
 	vdp_spr_inst: entity work.vdp_sprites
@@ -134,14 +151,18 @@ begin
 		smode_M4			=> smode_M4,
 		vram_A			=> spr_vram_A,
 		vram_D			=> vram_D,		
-		color				=> spr_color);
+		color				=> spr_color,
+		ss_regs_set		=> ss_regs_set,
+		ss_reset		=> ss_sprite_reset);
 
-	process (x, y, mask_column0, bg_priority, spr_color, bg_color, overscan, display_on, ggres, smode_M1, smode_M3)
+	process (x, y, mask_column0, bg_priority, spr_color, bg_color, overscan, display_on, ggres, smode_M1, smode_M3, text_mode)
 		variable spr_active	: boolean;
 		variable bg_active	: boolean;
 	begin
 		y1 <= '1';
-		if ((x>48 and x<=208) or (ggres='0' and x<=256 and x>0)) and -- thank you slingshot
+		if ((x>48 and x<=208) or
+			(text_mode='1' and ggres='0' and x>7 and x<248) or
+			(text_mode='0' and ggres='0' and x<=256 and x>0)) and -- thank you slingshot
  			(mask_column0='0' or x>=9) and display_on='1' then
 			if (((y>=24 and y<168) and smode_M1='0')
 				or ((y>=40 and y<184) and smode_M1='1')
@@ -149,7 +170,7 @@ begin
 				or (smode_M1='1' and y<224 and ggres='0') 
 				or (smode_M3='1' and y<240 and ggres='0') ) then
 				
-				spr_active	:= not (spr_color="0000");
+				spr_active	:= text_mode='0' and not (spr_color="0000");
 				bg_active	:= not (bg_color(3 downto 0)="0000");
 				if not spr_active and not bg_active then
 					out_color <= overscan ;
