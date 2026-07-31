@@ -62,6 +62,14 @@ localparam [31:0] SYSRAM_LIMIT  = 32'h2000;               // 8KB System RAM boun
 localparam [31:0] NVRAM_LIMIT   = 32'hA000;               // 8KB sysram + 32KB nvram
 localparam [12:0] MAX_ADDRS     = 13'd4096;
 
+// Realtime query mailbox (Tier 1 smart cache). Word offsets = byte offset / 8
+// (DDRAM_BASE is already the ARM phys address >> 3).
+localparam [28:0] QUERY_CTRL_ADDR = DDRAM_BASE + 29'hA000;  // byte offset 0x50000
+localparam [28:0] QUERY_REQ_BASE  = DDRAM_BASE + 29'hA001;  // byte offset 0x50008
+localparam [28:0] QUERY_RESP_BASE = DDRAM_BASE + 29'hA011;  // byte offset 0x50088
+localparam [28:0] ARM_CFG_ADDR    = DDRAM_BASE + 29'd8;     // byte offset 0x40: ARM config
+localparam [3:0]  MAX_RT_QUERIES  = 4'd16;
+
 // ======================================================================
 // Clock domain crossing synchronizers for DDRAM ack
 // ======================================================================
@@ -79,28 +87,53 @@ reg vblank_prev;
 wire vblank_rising = vblank & ~vblank_prev;
 always @(posedge clk) vblank_prev <= vblank;
 
+// Sticky vblank flag: set on the rising edge, cleared once S_IDLE consumes it.
+// Prevents a VBlank from being missed while the machine is busy servicing an
+// inter-VBlank realtime query.
+reg vblank_pending;
+always @(posedge clk) begin
+	if (reset)
+		vblank_pending <= 1'b0;
+	else if (vblank_rising)
+		vblank_pending <= 1'b1;
+	else if (state == S_IDLE && vblank_pending)
+		vblank_pending <= 1'b0;
+end
+
 // ======================================================================
 // State machine
 // ======================================================================
-localparam S_IDLE        = 4'd0;
-localparam S_DD_WR_WAIT  = 4'd1;
-localparam S_DD_RD_WAIT  = 4'd2;
-localparam S_READ_HDR    = 4'd3;
-localparam S_PARSE_HDR   = 4'd4;
-localparam S_READ_PAIR   = 4'd5;
-localparam S_PARSE_ADDR  = 4'd6;
-localparam S_DISPATCH    = 4'd7;
-localparam S_BRAM_WAIT   = 4'd8;
-localparam S_BRAM_WAIT2  = 4'd9;
-localparam S_STORE_VAL   = 4'd10;
-localparam S_FLUSH_BUF   = 4'd11;
-localparam S_WRITE_RESP  = 4'd12;
-localparam S_WR_HDR0     = 4'd13;
-localparam S_WR_HDR1     = 4'd14;
-localparam S_WR_DBG      = 4'd15;
+localparam S_IDLE        = 6'd0;
+localparam S_DD_WR_WAIT  = 6'd1;
+localparam S_DD_RD_WAIT  = 6'd2;
+localparam S_READ_HDR    = 6'd3;
+localparam S_PARSE_HDR   = 6'd4;
+localparam S_READ_PAIR   = 6'd5;
+localparam S_PARSE_ADDR  = 6'd6;
+localparam S_DISPATCH    = 6'd7;
+localparam S_BRAM_WAIT   = 6'd8;
+localparam S_BRAM_WAIT2  = 6'd9;
+localparam S_STORE_VAL   = 6'd10;
+localparam S_FLUSH_BUF   = 6'd11;
+localparam S_WRITE_RESP  = 6'd12;
+localparam S_WR_HDR0     = 6'd13;
+localparam S_WR_HDR1     = 6'd14;
+localparam S_WR_DBG      = 6'd15;
+// ARM config read (latches rtquery_armed once per VBlank)
+localparam S_RD_ARMCFG   = 6'd16;
+localparam S_PARSE_ARMCFG = 6'd17;
+// Realtime query mailbox states
+localparam S_QRY_PARSE   = 6'd18;
+localparam S_QRY_RD_REQ  = 6'd19;
+localparam S_QRY_FETCH   = 6'd20;
+localparam S_QRY_DISPATCH = 6'd21;
+localparam S_QRY_BRAM_W1 = 6'd22;
+localparam S_QRY_BRAM_W2 = 6'd23;
+localparam S_QRY_WR_RESP = 6'd24;
+localparam S_QRY_WR_CTRL = 6'd25;
 
-reg [3:0]  state;
-reg [3:0]  return_state;
+reg [5:0]  state;
+reg [5:0]  return_state;
 
 reg [31:0] frame_counter;
 always @(posedge clk) dbg_frame_counter <= frame_counter;
@@ -121,6 +154,19 @@ reg        use_nvram;      // 1 = reading from NVRAM, 0 = reading from sysram
 reg [15:0] dbg_ok_cnt;
 reg [15:0] dbg_oob_cnt;
 
+// Realtime query registers
+reg  [7:0] qry_request_seq;
+reg  [7:0] qry_last_seen_seq;
+reg  [7:0] qry_num;
+reg  [3:0] qry_idx;
+reg [31:0] qry_addr;
+reg  [7:0] qry_num_bytes;
+reg [31:0] qry_value;
+reg  [2:0] qry_byte_idx;
+reg        qry_oob;         // 1 = current query byte is out of range → 0
+reg [10:0] qry_poll_timer;
+reg        rtquery_armed = 1'b0;  // set by ARM via RA_ARM_CFG_RTQUERY bit
+
 // ======================================================================
 // Main state machine
 // ======================================================================
@@ -131,14 +177,17 @@ always @(posedge clk) begin
 		frame_counter <= 32'd0;
 		ddram_wr_req <= dwr_ack_s2;
 		ddram_rd_req <= drd_ack_s2;
+		qry_last_seen_seq <= 8'd0;
+		qry_poll_timer <= 11'd0;
 	end
 	else begin
 		case (state)
 
 		S_IDLE: begin
 			active <= 1'b0;
-			if (vblank_rising) begin
+			if (vblank_pending) begin
 				active <= 1'b1;
+				qry_poll_timer <= 11'd0;
 				dbg_ok_cnt  <= 16'd0;
 				dbg_oob_cnt <= 16'd0;
 				// Write header with busy=1
@@ -148,6 +197,21 @@ always @(posedge clk) begin
 				ddram_wr_req  <= ~ddram_wr_req;
 				return_state  <= S_READ_HDR;
 				state         <= S_DD_WR_WAIT;
+			end
+			else if (qry_poll_timer < 11'd2000) begin
+				// Space out inter-VBlank mailbox polls (~40us at 50MHz)
+				qry_poll_timer <= qry_poll_timer + 11'd1;
+			end
+			else if (rtquery_armed) begin
+				// Poll the realtime query control word for a new batch
+				qry_poll_timer <= 11'd0;
+				ddram_rd_addr <= QUERY_CTRL_ADDR;
+				ddram_rd_req  <= ~ddram_rd_req;
+				return_state  <= S_QRY_PARSE;
+				state         <= S_DD_RD_WAIT;
+			end
+			else begin
+				qry_poll_timer <= 11'd0;  // rtquery not armed — skip polling
 			end
 		end
 
@@ -314,13 +378,127 @@ always @(posedge clk) begin
 
 		// Debug word @ DDRAM_BASE+2 (offset 0x10):
 		// {version(8), 0(8), ok_cnt(16), oob_cnt(16), 0(16)}
+		// Version bumped 0x01 -> 0x02: signals rtquery mailbox support
+		// (ra_rtquery_supported() reads byte[0x17] and requires >= 0x02).
 		S_WR_DBG: begin
 			ddram_wr_addr <= DDRAM_BASE + 29'd2;
-			ddram_wr_din  <= {8'h01, 8'd0, dbg_ok_cnt, dbg_oob_cnt, 16'd0};
+			ddram_wr_din  <= {8'h02, 8'd0, dbg_ok_cnt, dbg_oob_cnt, 16'd0};
 			ddram_wr_be   <= 8'hFF;
 			ddram_wr_req  <= ~ddram_wr_req;
-			return_state  <= S_IDLE;
+			return_state  <= S_RD_ARMCFG;
 			state         <= S_DD_WR_WAIT;
+		end
+
+		// Read ARM-written config byte once per VBlank. ARM sets
+		// RA_ARM_CFG_RTQUERY (bit 0) when rtquery is active; the FPGA latches
+		// it to gate inter-VBlank query mailbox polling.
+		S_RD_ARMCFG: begin
+			ddram_rd_addr <= ARM_CFG_ADDR;
+			ddram_rd_req  <= ~ddram_rd_req;
+			return_state  <= S_PARSE_ARMCFG;
+			state         <= S_DD_RD_WAIT;
+		end
+
+		S_PARSE_ARMCFG: begin
+			rtquery_armed <= rd_data[0];
+			state <= S_IDLE;
+		end
+
+		// =============================================================
+		// Realtime Query Mailbox (Tier 1 smart cache)
+		// ARM writes addresses + a sequence number; FPGA reads System RAM /
+		// NVRAM live (inter-VBlank), writes values back, echoes the seq.
+		// =============================================================
+		S_QRY_PARSE: begin
+			// rd_data = control word. byte[0]=request_seq, byte[1]=num_queries
+			if (rd_data[7:0] != qry_last_seen_seq && rd_data[15:8] != 8'd0) begin
+				qry_request_seq <= rd_data[7:0];
+				qry_num         <= (rd_data[15:8] > {4'd0, MAX_RT_QUERIES}) ?
+				                   {4'd0, MAX_RT_QUERIES} : rd_data[15:8];
+				qry_idx         <= 4'd0;
+				state           <= S_QRY_RD_REQ;
+			end else begin
+				state <= S_IDLE;
+			end
+		end
+
+		S_QRY_RD_REQ: begin
+			ddram_rd_addr <= QUERY_REQ_BASE + {25'd0, qry_idx};
+			ddram_rd_req  <= ~ddram_rd_req;
+			return_state  <= S_QRY_FETCH;
+			state         <= S_DD_RD_WAIT;
+		end
+
+		S_QRY_FETCH: begin
+			// rd_data = request slot. [31:0]=address, byte[4]=num_bytes (1..4)
+			qry_addr      <= rd_data[31:0];
+			qry_num_bytes <= (rd_data[39:32] == 8'd0) ? 8'd1 : rd_data[39:32];
+			qry_value     <= 32'd0;
+			qry_byte_idx  <= 3'd0;
+			state         <= S_QRY_DISPATCH;
+		end
+
+		S_QRY_DISPATCH: begin
+			// Same region routing as the batch path (SMS is byte-granular).
+			if (qry_addr < SYSRAM_LIMIT) begin
+				sysram_addr <= {1'b0, qry_addr[12:0]};
+				use_nvram   <= 1'b0;
+				qry_oob     <= 1'b0;
+				state       <= S_QRY_BRAM_W1;
+			end
+			else if (qry_addr < NVRAM_LIMIT) begin
+				nvram_addr  <= qry_addr[14:0] - 15'h2000;
+				use_nvram   <= 1'b1;
+				qry_oob     <= 1'b0;
+				state       <= S_QRY_BRAM_W1;
+			end
+			else begin
+				qry_oob <= 1'b1;
+				state   <= S_QRY_BRAM_W2;  // out of range → contributes 0
+			end
+		end
+
+		S_QRY_BRAM_W1: begin
+			state <= S_QRY_BRAM_W2;  // BRAM latency cycle
+		end
+
+		S_QRY_BRAM_W2: begin
+			// Little-endian assembly: byte N occupies bits [N*8 +: 8]
+			qry_value <= qry_value |
+				({24'd0, (qry_oob ? 8'd0 : (use_nvram ? nvram_dout : sysram_dout))}
+				 << (qry_byte_idx * 4'd8));
+			qry_byte_idx <= qry_byte_idx + 3'd1;
+			if (qry_byte_idx + 3'd1 >= qry_num_bytes[2:0]) begin
+				state <= S_QRY_WR_RESP;
+			end else begin
+				qry_addr <= qry_addr + 32'd1;
+				state    <= S_QRY_DISPATCH;
+			end
+		end
+
+		S_QRY_WR_RESP: begin
+			ddram_wr_addr <= QUERY_RESP_BASE + {25'd0, qry_idx};
+			ddram_wr_din  <= {32'd0, qry_value};
+			ddram_wr_be   <= 8'hFF;
+			ddram_wr_req  <= ~ddram_wr_req;
+			qry_idx       <= qry_idx + 4'd1;
+			if (qry_idx + 4'd1 >= qry_num[3:0]) begin
+				return_state <= S_QRY_WR_CTRL;
+			end else begin
+				return_state <= S_QRY_RD_REQ;
+			end
+			state <= S_DD_WR_WAIT;
+		end
+
+		S_QRY_WR_CTRL: begin
+			qry_last_seen_seq <= qry_request_seq;
+			ddram_wr_addr     <= QUERY_CTRL_ADDR;
+			// byte[0]=echo seq, byte[1]=num, byte[4]=response_seq (ARM waits on it)
+			ddram_wr_din      <= {24'd0, qry_request_seq, 16'd0, qry_num[7:0], qry_request_seq};
+			ddram_wr_be       <= 8'hFF;
+			ddram_wr_req      <= ~ddram_wr_req;
+			return_state      <= S_IDLE;
+			state             <= S_DD_WR_WAIT;
 		end
 
 		default: state <= S_IDLE;
