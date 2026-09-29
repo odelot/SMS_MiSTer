@@ -20,18 +20,18 @@ The [upstream SMS_MiSTer](https://github.com/MiSTer-devel/SMS_MiSTer) core emula
 
 | File | Purpose |
 |------|--------|
-| `rtl/ra_ram_mirror_sms.sv` | State machine that reads emulated RAM (System RAM + NVRAM) and writes it to DDRAM using the Selective Address protocol |
+| `rtl/ra_ram_mirror_sms.sv` | State machine that reads emulated RAM (System RAM + NVRAM) and writes it to DDRAM using the Selective Address protocol, plus the RTQuery mailbox for on-demand reads |
 | `rtl/ddram_arb_sms.sv` | DDRAM bus arbiter — shares access between the framebuffer (screen rotation) and the RA mirror |
 
 ### Files Modified
 
 | File | Change |
 |------|--------|
-| `SMS.sv` | System RAM and NVRAM converted from single-port to dual-port (`dpram`), RA mirror and arbiter instantiated, NVRAM Port B muxed between SD card saves and RA reads |
+| `SMS.sv` | System RAM and NVRAM converted from single-port to dual-port (`dpram`), RA mirror and arbiter instantiated, NVRAM Port B muxed between SD card saves and RA reads, hardcore guardrails (status bit 63) |
 
 ### How the RAM Mirroring Works
 
-The Master System has a Z80-based 8-bit architecture with a relatively small memory map. This core uses the **Selective Address protocol** (Option C): the ARM binary writes a list of addresses it needs to evaluate, and the FPGA reads only those values from the emulated RAM and writes them back to DDRAM.
+The Master System has a Z80-based 8-bit architecture with a relatively small memory map. This core uses the **Selective Address protocol**: the ARM binary writes a list of addresses it needs to evaluate, and the FPGA reads only those values from the emulated RAM and writes them back to DDRAM. Between VBlanks, the FPGA also serves the **RTQuery mailbox** (`0x50000`), so the ARM can read any address on demand. Main uses it for **Smart Cache** mode (on by default), where pointer targets that move are resolved live instead of waiting for a periodic re-collection.
 
 **Memory regions exposed:**
 
@@ -53,6 +53,10 @@ The Master System has a Z80-based 8-bit architecture with a relatively small mem
 2. For each address, it dispatches to either System RAM or NVRAM via the dual-port Port B.
 3. Values are collected 8 bytes at a time into 64-bit words and written to the DDRAM response cache (`0x48000`).
 4. A response header with the current frame counter is written so the ARM can detect new data.
+
+### Hardcore Mode
+
+With `hardcore=1` in `retroachievements.cfg`, Main sets status bit 63 and the core enforces the restrictions in hardware: cheats are forced off and savestate restore is blocked. Master System and Game Gear are both **officially supported** for hardcore (Game Gear games use the same core and handler, console ID 15).
 
 ---
 
