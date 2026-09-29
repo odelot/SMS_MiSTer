@@ -61,6 +61,7 @@ localparam [28:0] VALCACHE_BASE = DDRAM_BASE + 29'h9000;  // byte offset 0x48000
 localparam [31:0] SYSRAM_LIMIT  = 32'h2000;               // 8KB System RAM boundary
 localparam [31:0] NVRAM_LIMIT   = 32'hA000;               // 8KB sysram + 32KB nvram
 localparam [12:0] MAX_ADDRS     = 13'd4096;
+localparam [15:0] CORE_VERSION  = 16'h0200;               // 2.0 — reported in header, used for User-Agent
 
 // Realtime query mailbox (Tier 1 smart cache). Word offsets = byte offset / 8
 // (DDRAM_BASE is already the ARM phys address >> 3).
@@ -192,7 +193,7 @@ always @(posedge clk) begin
 				dbg_oob_cnt <= 16'd0;
 				// Write header with busy=1
 				ddram_wr_addr <= DDRAM_BASE;
-				ddram_wr_din  <= {16'h0100, 8'h01, 8'd0, 32'h52414348};
+				ddram_wr_din  <= {CORE_VERSION, 8'h01, 8'd0, 32'h52414348};
 				ddram_wr_be   <= 8'hFF;
 				ddram_wr_req  <= ~ddram_wr_req;
 				return_state  <= S_READ_HDR;
@@ -359,7 +360,7 @@ always @(posedge clk) begin
 
 		S_WR_HDR0: begin
 			ddram_wr_addr <= DDRAM_BASE;
-			ddram_wr_din  <= {16'h0100, 8'h00, 8'd0, 32'h52414348};
+			ddram_wr_din  <= {CORE_VERSION, 8'h00, 8'd0, 32'h52414348};
 			ddram_wr_be   <= 8'hFF;
 			ddram_wr_req  <= ~ddram_wr_req;
 			return_state  <= S_WR_HDR1;
